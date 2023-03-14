@@ -160,27 +160,31 @@ class ConvNextBlock(nn.Module):
 class Attention(nn.Module):
     def __init__(self, dim, heads=4, dim_head=32):
         super().__init__()
-        self.scale = dim_head**-0.5
-        self.heads = heads
-        hidden_dim = dim_head * heads
+        self.scale = dim_head**-0.5              # 缩放因子，是一个标量
+        self.heads = heads                        # 多头注意力中头的数量
+        hidden_dim = dim_head * heads   # 每个头的维度
+         # 定义三个卷积层，用于计算 Q、K、V
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
+        # 定义一个卷积层，用于将多头注意力的结果转换回原始维度
         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
 
     def forward(self, x):
         b, c, h, w = x.shape
-        qkv = self.to_qkv(x).chunk(3, dim=1)
+        # 计算 Q、K、V，其中每个 tensor 的形状为 [b, heads * dim_head, h, w]
+        qkv = self.to_qkv(x).chunk(3, dim=1)   # 将第2个维度分成三块
         q, k, v = map(
             lambda t: rearrange(t, "b (h c) x y -> b h c (x y)", h=self.heads), qkv
         )
-        q = q * self.scale
-
+        q = q * self.scale                 # 缩放 Q
+        
+        # 计算相似度矩阵，形状为 [b, heads, h, w, w]
         sim = einsum("b h d i, b h d j -> b h i j", q, k)
-        sim = sim - sim.amax(dim=-1, keepdim=True).detach()
-        attn = sim.softmax(dim=-1)
+        sim = sim - sim.amax(dim=-1, keepdim=True).detach()  # 减去相似度矩阵的最大值，避免 softmax 溢出
+        attn = sim.softmax(dim=-1)          # 计算注意力矩阵，形状为 [b, heads, h, w, w]
 
-        out = einsum("b h i j, b h d j -> b h i d", attn, v)
-        out = rearrange(out, "b h (x y) d -> b (h d) x y", x=h, y=w)
-        return self.to_out(out)
+        out = einsum("b h i j, b h d j -> b h i d", attn, v)      # 计算注意力加权后的 V，形状为 [b, heads, h, w, dim_head]
+        out = rearrange(out, "b h (x y) d -> b (h d) x y", x=h, y=w)     # 将多头注意力的结果展开，形状为 [b, dim, h, w]
+        return self.to_out(out)  # 转换回原始维度，形状为 [b, dim, h, w]
 
 class LinearAttention(nn.Module):
     def __init__(self, dim, heads=4, dim_head=32):
@@ -355,11 +359,11 @@ def cosine_beta_schedule(timesteps, s=0.008):
     cosine schedule as proposed in https://arxiv.org/abs/2102.09672
     """
     steps = timesteps + 1
-    x = torch.linspace(0, timesteps, steps)
+    x = torch.linspace(0, timesteps, steps)    # [0,1,2,...,timesteps]
     alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    return torch.clip(betas, 0.0001, 0.9999)
+    return torch.clip(betas, 0.0001, 0.02)   # min=0.0001， max=0.02
 
 def linear_beta_schedule(timesteps):
     beta_start = 0.0001
@@ -389,7 +393,7 @@ betas = cosine_beta_schedule(timesteps=timesteps)
 # define alphas 
 alphas = 1. - betas
 alphas_cumprod = torch.cumprod(alphas, axis=0)
-alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
+alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)   # alpha[t-1]
 sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
 
 # calculations for diffusion q(x_t | x_{t-1}) and others
@@ -399,6 +403,7 @@ sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
 # calculations for posterior q(x_{t-1} | x_t, x_0)
 posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 
+# 
 def extract(a, t, x_shape):
     batch_size = t.shape[0]
     out = a.gather(-1, t.cpu())
@@ -428,8 +433,8 @@ image_size = 128
 transform = Compose([
     Resize(image_size),
     CenterCrop(image_size),
-    ToTensor(), # turn into Numpy array of shape HWC, divide by 255
-    Lambda(lambda t: (t * 2) - 1),
+    ToTensor(), # turn into Numpy array of shape HWC, divide by 255   !!!
+    Lambda(lambda t: (t * 2) - 1),   # [-1,1]
 
 ])
 
@@ -511,7 +516,6 @@ def p_losses(denoise_model, x_start, t, noise=None, loss_type="l1"):
 
 # In[20]:
 
-
 import torchvision
 from torchvision import transforms
 from torch.utils.data import DataLoader
@@ -534,30 +538,7 @@ dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 from torchvision import transforms
 from torch.utils.data import DataLoader
 
-# ↓↓注意如果使用国内版torchvision加载数据的，这一段请注释掉不需要↓↓
-# # define image transformations (e.g. using torchvision)
-# transform = Compose([
-#             transforms.RandomHorizontalFlip(), # 随机水平翻转图片
-#             transforms.ToTensor(), # 转成张量
-#             transforms.Lambda(lambda t: (t * 2) - 1) # 归一化到[-1,1]
-# ])
-
-# define function
-# def transforms(examples):
-#    examples["pixel_values"] = [transform(image.convert("L")) for image in examples["image"]] # 图片RGB-L等转化，参考函数部分
-#    del examples["image"]
-
-#    return examples
-
-# transformed_dataset = dataset.with_transform(transforms).remove_columns("label") # 动态处理~流处理
-
-# create dataloader
-# dataloader = DataLoader(transformed_dataset["train"], batch_size=batch_size, shuffle=True)
-# ↑↑注意如果使用国内版torchvision加载数据的，这一段请注释掉不需要↑↑
-
 batch = next(iter(dataloader)) # 抽样一个batch
-# print(batch.keys())
-# 国内版 
 print(batch[0].shape)
 
 
@@ -625,7 +606,7 @@ def num_to_groups(num, divisor):
 
 results_folder = Path("./results")
 results_folder.mkdir(exist_ok = True)
-save_and_sample_every = 1000
+save_and_sample_every = 1000      # 每1训练一千个batch保存一次
 
 
 # In[27]:
@@ -656,14 +637,12 @@ for epoch in range(epochs):
     for step, batch in enumerate(dataloader):
       optimizer.zero_grad()
 
-      # batch_size = batch["pixel_values"].shape[0]
-      # batch = batch["pixel_values"].to(device)
-      #国内版启用这段，注释上面两行
+      
       batch_size = batch[0].shape[0]
       batch = batch[0].to(device)
 
       # Algorithm 1 line 3: sample t uniformally for every example in the batch
-      t = torch.randint(0, timesteps, (batch_size,), device=device).long()
+      t = torch.randint(0, timesteps, (batch_size,), device=device).long()  # batch中每一个img采样的步数随机
 
       loss = p_losses(model, batch, t, loss_type="huber")
 
@@ -693,7 +672,6 @@ samples = sample(model, image_size=image_size, batch_size=64, channels=channels)
 # show a random one
 random_index = 5
 plt.imshow(samples[-1][random_index].reshape(image_size, image_size, channels), cmap="gray")
-
 
 # In[33]:
 
